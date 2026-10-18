@@ -1,0 +1,600 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style><script>if(/[?&]mini/.test(location.search)){window.MINI=1;document.addEventListener('keydown',function(e){if(e.key==='Escape')parent.postMessage('pb-esc','*')});document.documentElement.setAttribute('data-theme','dark');document.write('<style>header,.info-row,.legend{display:none!important}body{padding:0!important}.canvas-wrap{border:0!important;border-radius:0!important}</style>')}</script></head><body>
+<title>Parcel Sorting Grid</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg:#080b12;--surface:#0f1320;--surface2:#161b2e;
+  --border:#222840;--fg:#dde2f5;--fg2:#6b729a;--accent:#4477ff;
+  color-scheme:dark;
+}
+@media(prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){--bg:#eef0f8;--surface:#fff;--surface2:#e4e7f4;--border:#ccd0e8;--fg:#151828;--fg2:#5a6080;--accent:#3055d0;color-scheme:light;}
+}
+:root[data-theme="light"]{--bg:#eef0f8;--surface:#fff;--surface2:#e4e7f4;--border:#ccd0e8;--fg:#151828;--fg2:#5a6080;--accent:#3055d0;color-scheme:light;}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:var(--bg);color:var(--fg);font-family:'Inter',sans-serif;overflow-x:hidden;}
+body{padding-block:12px;padding-left:max(12px,env(safe-area-inset-left,0px));padding-right:max(12px,env(safe-area-inset-right,0px));}
+.app{display:flex;flex-direction:column;gap:10px;}
+header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+h1{font-size:14px;font-weight:600;}
+.sub{font-size:10px;color:var(--fg2);font-family:'JetBrains Mono',monospace;margin-top:2px;}
+.controls{display:flex;gap:6px;align-items:center;}
+button{font-family:'Inter',sans-serif;font-size:11px;font-weight:500;padding:5px 12px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--fg);cursor:pointer;transition:background .12s;}
+button:hover{background:var(--surface2);border-color:var(--accent);}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+.primary:hover{opacity:.85;}
+#spd{font-size:10px;color:var(--fg2);font-family:'JetBrains Mono',monospace;min-width:22px;}
+.canvas-wrap{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);}
+canvas{display:block;margin:0 auto;}
+.info-row{display:flex;flex-wrap:wrap;gap:6px;}
+.chip{font-size:10px;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--fg2);}
+.chip b{color:var(--fg);font-weight:500;}
+.legend{display:flex;flex-wrap:wrap;gap:6px;}
+.leg{display:flex;align-items:center;gap:5px;font-size:10px;color:var(--fg2);}
+.ldot{width:9px;height:9px;border-radius:50%;flex-shrink:0;}
+</style>
+<div class="app">
+  <header>
+    <div>
+      <h1>Autonomous Parcel Sorting Grid</h1>
+      <div class="sub">100×120 floor · 8-parcel waves · 8-direction constant speed · swept space-time reservation · zero overlap</div>
+    </div>
+    <div class="controls">
+      <span id="spd">1×</span>
+      <button id="btnSpd">Speed</button>
+      <button class="primary" id="btnRst">Restart</button>
+    </div>
+  </header>
+  <div class="canvas-wrap"><canvas id="c"></canvas></div>
+  <div class="info-row" id="stats"></div>
+  <div class="legend" id="leg"></div>
+</div>
+<script>
+/*
+  MULTI-AGENT PATH FINDING with space-time reservations.
+  ──────────────────────────────────────────────────────
+  Time runs in sub-ticks (SUB per frame). A parcel moves one cell in one of
+  8 directions or holds still. A straight move takes T_STRAIGHT sub-ticks
+  and a diagonal move T_DIAG ≈ √2·T_STRAIGHT, so every moving parcel
+  travels at the same constant speed in any direction (diagonals are within
+  0.2%), and the rollers under it turn at the matching surface speed.
+
+  Each parcel plans its whole route once, at launch, with space-time A*.
+  For every move over [t0,t1) it reserves the SWEPT rectangle
+  (footprint at start ∪ footprint at end) plus a 1-cell safety gap. A
+  parcel's continuous position always lies inside its swept rectangle, so
+  two parcels whose reservations never overlap in both time and space
+  never touch at any instant.
+  Later parcels plan around all earlier reservations, so plans never need
+  to change and deadlock is impossible.
+
+  Layout
+  ──────
+  Floor      : cols 0-99, rows 0-119 (every cell is an omni-wheel)
+  Arena      : rows 0-99
+  Input zone : rows 100-119  (BOTTOM)
+  Baskets    :
+    TOP   A(0-32) B(33-66) C(67-99)
+    LEFT  D(r0-32) E(r33-66) F(r67-99)
+    RIGHT G(r0-32) H(r33-66) I(r67-99)
+
+  Parcel is 7×7 cells. It drives from its staging spot through the arena
+  and fully into its basket at the same speed, then fades out.
+  Lifecycle: staged → moving → parked (fading in basket) → removed
+*/
+
+const AW=100, AH=100, IH=20, TH=120;
+const PC=7;   // parcel size in cells
+const GAP=1;  // minimum empty cells between two parcels
+const BATCH=8;
+const SUB=6;                       // sub-ticks per frame tick
+const T_STRAIGHT=12, T_DIAG=17;    // 17/12 ≈ √2 → same speed on diagonals
+const T_WAIT=6;                    // shortest hold
+const SPEED=SUB/T_STRAIGHT;        // 0.5 cell per tick
+const LAUNCH_GAP=36;               // sub-ticks between launches
+const FADE_T=108;                  // sub-ticks a parcel rests in its basket while fading
+const BUCKET=12;                   // reservation table time bucket
+const HORIZON=6000, MAX_EXPAND=8000; // search budget per attempt; a blocked parcel retries later
+const COLORS=['#ff4455','#ff9020','#2ecf88','#4aaaff','#cc44ff','#ffcc22','#44ddbb','#ff6688'];
+
+const BASKETS={
+  A:{side:'top',  c0:0, c1:32}, B:{side:'top',  c0:33,c1:66}, C:{side:'top',  c0:67,c1:99},
+  D:{side:'left', r0:0, r1:32}, E:{side:'left', r0:33,r1:66}, F:{side:'left', r0:67,r1:99},
+  G:{side:'right',r0:0, r1:32}, H:{side:'right',r0:33,r1:66}, I:{side:'right',r0:67,r1:99},
+};
+const BKEYS=Object.keys(BASKETS);
+// Parcels may only cross into a basket through its middle band, so they drop
+// near the basket's centre rather than by the junction with its neighbour.
+const MOUTH_MARGIN=9; // cells kept clear at each end of a 33-cell basket
+for(const bk of Object.values(BASKETS)){
+  if(bk.side==='top'){ bk.c0+=MOUTH_MARGIN; bk.c1-=MOUTH_MARGIN; }
+  else { bk.r0+=MOUTH_MARGIN; bk.r1-=MOUTH_MARGIN; }
+}
+
+let S=6;
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+
+// ── Geometry ──────────────────────────────────────────────────────────────
+const rectOf=(c,r)=>({x0:c,y0:r,x1:c+PC-1,y1:r+PC-1});
+const sweptRect=(a,b)=>({x0:Math.min(a[0],b[0]),y0:Math.min(a[1],b[1]),
+                         x1:Math.max(a[0],b[0])+PC-1,y1:Math.max(a[1],b[1])+PC-1});
+// true when the two rects are closer than GAP empty cells
+const hit=(a,b)=>a.x0<=b.x1+GAP&&b.x0<=a.x1+GAP&&a.y0<=b.y1+GAP&&b.y0<=a.y1+GAP;
+
+// A position is legal on the floor, or inside the parcel's own basket.
+function validPos(c,r,bk){
+  const x1=c+PC-1,y1=r+PC-1;
+  if(c>=0&&x1<AW&&r>=0&&y1<TH) return true;
+  if(bk.side==='top')  return r<0&&r>=-PC&&c>=bk.c0&&x1<=bk.c1;
+  if(bk.side==='left') return c<0&&c>=-PC&&y1<AH&&r>=bk.r0&&y1<=bk.r1;
+  return x1>=AW&&c<=AW&&y1<AH&&r>=bk.r0&&y1<=bk.r1;
+}
+const isGoal=(c,r,bk)=>bk.side==='top'?r===-PC:bk.side==='left'?c===-PC:c===AW;
+// Lower bound on time to the basket, in sub-ticks: octile distance to the
+// basket's mouth on the arena edge, then PC straight moves through it.
+const octile=(a,b)=>T_STRAIGHT*Math.max(a,b)+(T_DIAG-T_STRAIGHT)*Math.min(a,b);
+function heur(c,r,bk){
+  if(bk.side==='top'){
+    if(r<0) return T_STRAIGHT*(r+PC);
+    return octile(r,Math.max(0,bk.c0-1-c,c+PC-1-bk.c1-1))+T_STRAIGHT*PC;
+  }
+  const lane=Math.max(0,bk.r0-1-r,r+PC-1-bk.r1-1);
+  if(bk.side==='left'){
+    if(c<0) return T_STRAIGHT*(c+PC);
+    return octile(c,lane)+T_STRAIGHT*PC;
+  }
+  if(c+PC-1>=AW) return T_STRAIGHT*(AW-c);
+  return octile(AW-PC-c,lane)+T_STRAIGHT*PC;
+}
+
+// ── Space-time reservation table ──────────────────────────────────────────
+// resv: time bucket → [{id,t0,t1,x0,y0,x1,y1}] swept rectangles held over [t0,t1)
+// staticRes: staged parcels, which block their spot for all time
+let resv=new Map(), staticRes=[];
+
+function addRes(t0,t1,rect,id){
+  const q={id,t0,t1,...rect};
+  for(let b=Math.floor(t0/BUCKET);b<=Math.floor((t1-1)/BUCKET);b++){
+    if(!resv.has(b)) resv.set(b,[]);
+    resv.get(b).push(q);
+  }
+}
+function isFree(rect,t0,t1,id){
+  for(let b=Math.floor(t0/BUCKET);b<=Math.floor((t1-1)/BUCKET);b++){
+    const L=resv.get(b);
+    if(L) for(const q of L) if(q.id!==id&&q.t0<t1&&t0<q.t1&&hit(rect,q)) return false;
+  }
+  for(const q of staticRes) if(q.id!==id&&hit(rect,q)) return false;
+  return true;
+}
+
+// ── Binary heap ───────────────────────────────────────────────────────────
+class Heap{
+  constructor(less){this.a=[];this.less=less;}
+  get size(){return this.a.length;}
+  push(x){const a=this.a;a.push(x);let i=a.length-1;
+    while(i>0){const p=(i-1)>>1;if(!this.less(a[i],a[p]))break;[a[i],a[p]]=[a[p],a[i]];i=p;}}
+  pop(){const a=this.a,top=a[0],last=a.pop();
+    if(a.length){a[0]=last;let i=0;
+      for(;;){const l=2*i+1,r=l+1;let m=i;
+        if(l<a.length&&this.less(a[l],a[m]))m=l;
+        if(r<a.length&&this.less(a[r],a[m]))m=r;
+        if(m===i)break;[a[i],a[m]]=[a[m],a[i]];i=m;}}
+    return top;}
+}
+
+// ── Space-time A* ─────────────────────────────────────────────────────────
+// Plans from the parcel's staging cell into its basket, starting at time t0.
+// Returns waypoints [[c,r,t],...] (t in sub-ticks) or null.
+const MOVES=[[0,-1],[1,0],[-1,0],[0,1],[1,-1],[-1,-1],[1,1],[-1,1],[0,0]];
+function planPath(p,t0){
+  const bk=BASKETS[p.cat];
+  // States reached within the same hold-length window count as one, which
+  // keeps the space-time search small (each move is still checked exactly).
+  const key=(c,r,g)=>(Math.floor(g/T_WAIT)*136+(r+8))*128+(c+8);
+  const open=new Heap((a,b)=>a.f<b.f||(a.f===b.f&&a.g>b.g));
+  const seen=new Set([key(p.c,p.r,0)]);
+  open.push({c:p.c,r:p.r,g:0,f:heur(p.c,p.r,bk),prev:null});
+  let n=0;
+  while(open.size&&n++<MAX_EXPAND){
+    const s=open.pop();
+    if(isGoal(s.c,s.r,bk)&&parkFree(s,t0,p.id)){
+      const path=[];
+      for(let q=s;q;q=q.prev) path.push([q.c,q.r,t0+q.g]);
+      return path.reverse();
+    }
+    if(s.g>=HORIZON) continue;
+    for(const[dc,dr]of MOVES){
+      const nc=s.c+dc, nr=s.r+dr;
+      if(!validPos(nc,nr,bk)) continue;
+      // A diagonal sweeps both corner positions too
+      if(dc&&dr&&!(validPos(nc,s.r,bk)&&validPos(s.c,nr,bk))) continue;
+      // Once clear of the input zone (plus gap) a parcel never drives back
+      // into it, so a new wave can be staged there safely.
+      if(dr===1&&nr+PC-1>=AH-GAP) continue;
+      const g=s.g+(dc&&dr?T_DIAG:dc||dr?T_STRAIGHT:T_WAIT);
+      const k=key(nc,nr,g);
+      if(seen.has(k)) continue;
+      if(!isFree(sweptRect([s.c,s.r],[nc,nr]),t0+s.g,t0+g,p.id)) continue;
+      seen.add(k);
+      open.push({c:nc,r:nr,g,f:g+heur(nc,nr,bk),prev:s});
+    }
+  }
+  return null;
+}
+// The basket spot must stay free while the parcel rests there and fades.
+function parkFree(s,t0,id){
+  return isFree(rectOf(s.c,s.r),t0+s.g,t0+s.g+FADE_T,id);
+}
+
+function commitPath(p,path,t0){
+  staticRes=staticRes.filter(q=>q.id!==p.id);
+  for(let i=0;i<path.length-1;i++) addRes(path[i][2],path[i+1][2],sweptRect(path[i],path[i+1]),p.id);
+  const [c,r,tA]=path[path.length-1];
+  addRes(tA,tA+FADE_T,rectOf(c,r),p.id);
+  p.path=path; p.seg=0; p.arriveT=tA; p.state='moving';
+}
+
+// ── State ─────────────────────────────────────────────────────────────────
+let parcels=[],idSeq=0,tick=0,T=0,totalSorted=0,batchCount=0;
+let lastLaunch=0;
+const counts={}; BKEYS.forEach(k=>counts[k]=0);
+const SPEEDS=[1,2,3,5];
+let speedIdx=0,frameId;
+
+// Cell size that fits both the page width and the window height, leaving
+// room below for the stats and legend rows.
+function resize(){
+  const W=canvas.parentElement.clientWidth;
+  const top=canvas.parentElement.getBoundingClientRect().top+window.scrollY;
+  const H=window.MINI?1e9:window.innerHeight-top-84;
+  const fit=Math.min((W-8)/(12+AW+12),H/(8+TH+2));
+  S=Math.max(2,Math.floor(fit*0.95*4)/4);
+  canvas.width=Math.round((12+AW+12)*S);
+  canvas.height=Math.round((8+TH+2)*S);
+  canvas.style.width=canvas.width+'px';
+  canvas.style.height=canvas.height+'px';
+}
+const gx=()=>12*S, gy=()=>8*S;
+const cx=c=>gx()+c*S, cy=r=>gy()+r*S;
+
+// ── Staging ───────────────────────────────────────────────────────────────
+function stageBatch(){
+  batchCount++;
+  const batch=[];
+  for(let i=0;i<BATCH;i++){
+    let c,r,tries=0,ok=false;
+    while(!ok&&tries++<300){
+      c=Math.floor(Math.random()*(AW-PC+1));
+      r=AH+Math.floor(Math.random()*(IH-PC+1));
+      ok=staticRes.every(q=>!hit(rectOf(c,r),q));
+    }
+    if(!ok) continue;
+    const id=idSeq++;
+    const p={id,cat:BKEYS[Math.floor(Math.random()*BKEYS.length)],color:COLORS[i%COLORS.length],
+      c,r,drawCol:c,drawRow:r,path:null,seg:0,arriveT:0,
+      state:'staged',retryAt:0,fadeAlpha:1,odo:0,dir:[0,-1],moving:false,batchId:batchCount};
+    staticRes.push({id,...rectOf(c,r)});
+    batch.push(p);
+  }
+  parcels.push(...batch);
+  updateLegend(batch);
+}
+
+// The input zone is clear when every launched parcel is out of it (plus gap).
+function inputZoneClear(){
+  return parcels.every(p=>{
+    if(p.state==='staged') return false;
+    const a=p.path[p.seg], b=p.path[Math.min(p.seg+1,p.path.length-1)];
+    return Math.max(a[1],b[1])+PC-1<AH-GAP;
+  });
+}
+
+// ── Update ────────────────────────────────────────────────────────────────
+function onTick(){
+  // Arrivals and removals
+  parcels.forEach(p=>{
+    if(p.state==='moving'&&T>=p.arriveT){
+      p.state='parked'; counts[p.cat]++; totalSorted++;
+    }
+  });
+  parcels=parcels.filter(p=>!(p.state==='parked'&&T>=p.arriveT+FADE_T));
+  for(const b of resv.keys()) if((b+1)*BUCKET<=T) resv.delete(b);
+
+  // New wave once the input zone is empty
+  if(inputZoneClear()){ stageBatch(); lastLaunch=T; }
+
+  // Launch: try one staged parcel at a time (topmost first). A parcel with no
+  // conflict-free route yet stays parked on its spot and retries later.
+  if(T-lastLaunch>=LAUNCH_GAP){
+    const p=parcels.filter(p=>p.state==='staged'&&T>=p.retryAt).sort((a,b)=>a.r-b.r)[0];
+    if(p){
+      const path=planPath(p,T);
+      if(path){ commitPath(p,path,T); lastLaunch=T; }
+      else p.retryAt=T+LAUNCH_GAP;
+    }
+  }
+}
+
+function update(){
+  tick++; T+=SUB;
+  onTick();
+  parcels.forEach(p=>{
+    if(p.state==='staged'){ p.drawCol=p.c; p.drawRow=p.r; p.moving=false; return; }
+    const P=p.path, L=P.length-1;
+    while(p.seg<L&&P[p.seg+1][2]<=T) p.seg++;
+    const a=P[p.seg], b=P[Math.min(p.seg+1,L)];
+    const f=b===a?0:(T-a[2])/(b[2]-a[2]);
+    const nc=a[0]+(b[0]-a[0])*f, nr=a[1]+(b[1]-a[1])*f;
+    p.odo+=Math.hypot(nc-p.drawCol,nr-p.drawRow);
+    p.drawCol=nc; p.drawRow=nr;
+    p.moving=a[0]!==b[0]||a[1]!==b[1];
+    if(p.moving) p.dir=[b[0]-a[0],b[1]-a[1]];
+    p.fadeAlpha=p.state==='parked'?Math.max(0,1-(T-p.arriveT)/FADE_T):1;
+  });
+}
+
+// ── Render ────────────────────────────────────────────────────────────────
+function render(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  const dark=document.documentElement.dataset.theme
+    ?document.documentElement.dataset.theme==='dark'
+    :window.matchMedia('(prefers-color-scheme:dark)').matches;
+
+  const C=dark?{
+    ab:'#0a0f1e',al:'#14203a',
+    ib:'rgba(200,40,40,0.13)',il:'#2a1520',ibdr:'rgba(230,60,60,0.55)',
+    bkbg:'#0c1228',bkbdr:'#1e2a50',
+    wi:'rgba(40,55,100,0.5)',wa:'rgba(70,120,255,',war:'rgba(100,160,255,'
+  }:{
+    ab:'#f3f4fb',al:'#d5d9ee',
+    ib:'rgba(200,40,40,0.07)',il:'#eed8da',ibdr:'rgba(190,50,50,0.4)',
+    bkbg:'#e8eaf8',bkbdr:'#bcc4e8',
+    wi:'rgba(170,180,225,0.65)',wa:'rgba(40,80,200,',war:'rgba(60,100,220,'
+  };
+
+  const BW=12*S,BH=8*S,AX=gx(),AY=gy();
+
+  // Wheels in contact with a parcel: the cells under its current footprint.
+  // A rolling wheel's surface moves at exactly the parcel's speed (odometer);
+  // a wheel under a holding parcel is engaged but still.
+  const wheels={};
+  parcels.forEach(p=>{
+    if(p.state==='staged'&&!p.moving) return;
+    const c0=Math.floor(p.drawCol),c1=Math.ceil(p.drawCol+PC)-1;
+    const r0=Math.floor(p.drawRow),r1=Math.ceil(p.drawRow+PC)-1;
+    for(let c=Math.max(0,c0);c<=Math.min(AW-1,c1);c++)
+      for(let r=Math.max(0,r0);r<=Math.min(TH-1,r1);r++)
+        wheels[`${c},${r}`]={dir:p.dir,odo:p.odo,moving:p.moving};
+  });
+
+  // Arena bg
+  ctx.fillStyle=C.ab; ctx.fillRect(AX,AY,AW*S,AH*S);
+  // Input zone bg
+  ctx.fillStyle=C.ib; ctx.fillRect(AX,AY+AH*S,AW*S,IH*S);
+
+  // Wheel glow cells
+  for(const[wk,wh]of Object.entries(wheels)){
+    const[wc,wr]=wk.split(',').map(Number);
+    ctx.fillStyle=C.wa+(wh.moving?0.2:0.1)+')';
+    ctx.fillRect(cx(wc),cy(wr),S,S);
+  }
+
+  // Grid lines — arena
+  ctx.strokeStyle=C.al; ctx.lineWidth=0.35;
+  for(let c=0;c<=AW;c++){ctx.beginPath();ctx.moveTo(cx(c),AY);ctx.lineTo(cx(c),AY+AH*S);ctx.stroke();}
+  for(let r=0;r<=AH;r++){ctx.beginPath();ctx.moveTo(AX,cy(r));ctx.lineTo(AX+AW*S,cy(r));ctx.stroke();}
+  // Grid lines — input zone
+  ctx.strokeStyle=C.il; ctx.lineWidth=0.28;
+  for(let c=0;c<=AW;c++){ctx.beginPath();ctx.moveTo(cx(c),AY+AH*S);ctx.lineTo(cx(c),AY+TH*S);ctx.stroke();}
+  for(let r=AH;r<=TH;r++){ctx.beginPath();ctx.moveTo(AX,cy(r));ctx.lineTo(AX+AW*S,cy(r));ctx.stroke();}
+
+  // Borders
+  ctx.strokeStyle=dark?'#283060':'#8890c0'; ctx.lineWidth=1.4;
+  ctx.strokeRect(AX,AY,AW*S,AH*S);
+  ctx.strokeStyle=C.ibdr; ctx.lineWidth=1.5;
+  ctx.setLineDash([5,4]);
+  ctx.strokeRect(AX+.5,AY+AH*S+.5,AW*S-1,IH*S-1);
+  ctx.setLineDash([]);
+
+  // Input zone label
+  ctx.save();
+  ctx.translate(AX+AW*S/2,AY+AH*S+IH*S/2);
+  ctx.fillStyle=dark?'rgba(220,60,60,0.28)':'rgba(160,35,35,0.28)';
+  ctx.font=`500 ${Math.max(7,S*1.4)}px JetBrains Mono,monospace`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('INPUT ZONE  ·  100 × 20',0,0);
+  ctx.restore();
+
+  // Baskets
+  const BC={A:'#5ba8ff',B:'#4ecf88',C:'#ffb840',D:'#cc77ff',E:'#ff5566',F:'#ff8844',G:'#5be0e0',H:'#ffcc44',I:'#aa88ff'};
+  const drawBk=(k,px,py,pw,ph)=>{
+    const bc=BC[k];
+    ctx.fillStyle=C.bkbg; ctx.strokeStyle=C.bkbdr; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.roundRect(px,py,pw,ph,4); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=bc+(dark?'2e':'20');
+    ctx.beginPath(); ctx.roundRect(px+1,py+1,pw-2,ph-2,3); ctx.fill();
+    ctx.fillStyle=bc;
+    ctx.font=`700 ${Math.max(10,S*2.1)}px Inter,sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(k,px+pw/2,py+ph/2-8);
+    ctx.font=`600 ${Math.max(9,S*1.5)}px JetBrains Mono,monospace`;
+    ctx.fillStyle=dark?'rgba(255,255,255,0.55)':'rgba(0,0,0,0.4)';
+    ctx.fillText(counts[k],px+pw/2,py+ph/2+9);
+  };
+  [['A',0,32],['B',33,66],['C',67,99]].forEach(([k,c1,c2])=>drawBk(k,AX+c1*S,AY-BH,(c2-c1+1)*S,BH-2));
+  [['D',0,32],['E',33,66],['F',67,99]].forEach(([k,r1,r2])=>drawBk(k,AX-BW,AY+r1*S,BW-2,(r2-r1+1)*S));
+  [['G',0,32],['H',33,66],['I',67,99]].forEach(([k,r1,r2])=>drawBk(k,AX+AW*S+2,AY+r1*S,BW-2,(r2-r1+1)*S));
+
+  // Idle wheels (whole floor: arena and input zone)
+  if(S>=4){
+    for(let r=0;r<TH;r++) for(let c=0;c<AW;c++){
+      if(wheels[`${c},${r}`]) continue;
+      const wcx=cx(c)+S/2,wcy=cy(r)+S/2,rad=S*0.27;
+      const ang=Math.sin(c*1.9+r*2.3)*Math.PI+Math.cos(c*0.7+r*1.1)*0.6;
+      ctx.save(); ctx.translate(wcx,wcy); ctx.rotate(ang);
+      ctx.beginPath(); ctx.arc(0,0,rad,0,Math.PI*2);
+      ctx.strokeStyle=C.wi; ctx.lineWidth=Math.max(0.4,S*0.055); ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-rad*.45,0); ctx.lineTo(rad*.45,0);
+      ctx.moveTo(rad*.1,-rad*.3); ctx.lineTo(rad*.45,0); ctx.lineTo(rad*.1,rad*.3);
+      ctx.strokeStyle=C.wi; ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // Active wheels: point in the drive direction; roller treads slide at the
+  // parcel's surface speed (one cell of travel = one cell of tread motion).
+  for(const[wk,wh]of Object.entries(wheels)){
+    const[wc,wr]=wk.split(',').map(Number);
+    const wcx=cx(wc)+S/2,wcy=cy(wr)+S/2,rad=S*0.3;
+    ctx.save(); ctx.translate(wcx,wcy); ctx.rotate(Math.atan2(wh.dir[1],wh.dir[0]));
+    ctx.beginPath(); ctx.arc(0,0,rad,0,Math.PI*2);
+    ctx.strokeStyle=C.wa+(wh.moving?0.95:0.5)+')'; ctx.lineWidth=Math.max(.5,S*.08); ctx.stroke();
+    // Treads
+    const sp=rad*0.8, off=((wh.odo*S)%sp+sp)%sp;
+    ctx.beginPath();
+    for(let x=-rad+off;x<rad;x+=sp){
+      const hl=Math.sqrt(Math.max(0,rad*rad-x*x))*0.85;
+      ctx.moveTo(x,-hl); ctx.lineTo(x,hl);
+    }
+    ctx.strokeStyle=C.war+(wh.moving?0.55:0.3)+')'; ctx.lineWidth=Math.max(.4,S*.05); ctx.stroke();
+    if(wh.moving){
+      ctx.beginPath();
+      ctx.moveTo(rad*.1,-rad*.38); ctx.lineTo(rad*.5,0); ctx.lineTo(rad*.1,rad*.38);
+      ctx.strokeStyle=C.war+'1)'; ctx.lineWidth=Math.max(.4,S*.07); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Track points of a parcel's path (holds removed)
+  const pts=(path,from,to)=>{
+    const out=[];
+    for(let i=Math.max(0,from);i<=Math.min(to,path.length-1);i++){
+      const q=path[i],l=out[out.length-1];
+      if(!l||l[0]!==q[0]||l[1]!==q[1]) out.push(q);
+    }
+    return out;
+  };
+  const mid=v=>v*S+S*PC/2;
+
+  // Travelled track (solid, fading tail)
+  parcels.forEach(p=>{
+    if(!p.path) return;
+    const tr=pts(p.path,0,p.seg).slice(-28);
+    tr.push([p.drawCol,p.drawRow]);
+    for(let j=1;j<tr.length;j++){
+      const a=(j/tr.length)*0.48*p.fadeAlpha;
+      ctx.beginPath();
+      ctx.strokeStyle=p.color+Math.floor(a*255).toString(16).padStart(2,'0');
+      ctx.lineWidth=Math.max(2,S*PC*0.13); ctx.lineCap='round';
+      ctx.moveTo(gx()+mid(tr[j-1][0]),gy()+mid(tr[j-1][1]));
+      ctx.lineTo(gx()+mid(tr[j][0]),gy()+mid(tr[j][1]));
+      ctx.stroke();
+    }
+  });
+
+  // Planned track to the basket (dashed)
+  parcels.forEach(p=>{
+    if(p.state!=='moving') return;
+    const ahead=pts(p.path,p.seg+1,p.path.length-1);
+    if(!ahead.length) return;
+    ctx.save();
+    ctx.strokeStyle=p.color+'55';
+    ctx.lineWidth=Math.max(1,S*PC*0.09);
+    ctx.setLineDash([S*.55,S*.6]); ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(gx()+mid(p.drawCol),gy()+mid(p.drawRow));
+    ahead.forEach(q=>ctx.lineTo(gx()+mid(q[0]),gy()+mid(q[1])));
+    ctx.stroke(); ctx.setLineDash([]); ctx.restore();
+  });
+
+  // Parcels
+  parcels.forEach(p=>{
+    const alpha=p.fadeAlpha;
+    if(alpha<=0) return;
+    const px=cx(p.drawCol),py=cy(p.drawRow),sz=S*PC;
+    ctx.globalAlpha=alpha;
+
+    // Glow
+    ctx.fillStyle=p.color+'15';
+    ctx.beginPath(); ctx.roundRect(px-S*.5,py-S*.5,sz+S,sz+S,5); ctx.fill();
+    // Shadow
+    ctx.fillStyle='rgba(0,0,0,0.26)';
+    ctx.beginPath(); ctx.roundRect(px+2,py+3,sz,sz,5); ctx.fill();
+    // Body
+    ctx.fillStyle=p.color;
+    ctx.beginPath(); ctx.roundRect(px,py,sz,sz,5); ctx.fill();
+    // Sheen
+    ctx.fillStyle='rgba(255,255,255,0.2)';
+    ctx.beginPath(); ctx.roundRect(px+3,py+3,sz-6,sz*.3,3); ctx.fill();
+    // Label
+    ctx.fillStyle='#fff';
+    ctx.font=`800 ${Math.max(9,sz*.4)}px Inter,sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(p.cat,px+sz/2,py+sz/2);
+    // Chevron
+    if(p.moving){
+      const ang=Math.atan2(p.dir[1],p.dir[0]);
+      ctx.save(); ctx.translate(px+sz/2,py+sz*.76); ctx.rotate(ang);
+      ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.lineWidth=Math.max(1,sz*.062);
+      const hs=sz*.19;
+      ctx.beginPath(); ctx.moveTo(-hs,hs*.55); ctx.lineTo(hs,0); ctx.lineTo(-hs,-hs*.55);
+      ctx.stroke(); ctx.restore();
+    }
+    ctx.globalAlpha=1;
+  });
+}
+
+function renderStats(){
+  const mv=parcels.filter(p=>p.state==='moving'&&p.moving).length;
+  const hold=parcels.filter(p=>p.state==='moving'&&!p.moving).length;
+  const st=parcels.filter(p=>p.state==='staged').length;
+  document.getElementById('stats').innerHTML=
+    `<div class="chip">Sorted <b>${totalSorted}</b></div>`+
+    `<div class="chip">Moving <b>${mv}</b></div>`+
+    `<div class="chip">Holding <b>${hold}</b></div>`+
+    `<div class="chip">Staged <b>${st}</b></div>`+
+    `<div class="chip">Speed <b>${SPEED} cell / tick, any direction</b></div>`+
+    `<div class="chip">Batch <b>${batchCount}</b></div>`;
+}
+
+function updateLegend(batch){
+  const lg=document.getElementById('leg');
+  lg.innerHTML=`<div class="leg"><span class="ldot" style="background:rgba(220,50,50,0.65)"></span>Input zone</div>`;
+  batch.forEach(p=>{
+    lg.innerHTML+=`<div class="leg"><span class="ldot" style="background:${p.color}"></span>→ ${p.cat}</div>`;
+  });
+}
+
+function loop(){
+  frameId=requestAnimationFrame(loop);
+  const spd=SPEEDS[speedIdx];
+  for(let i=0;i<spd;i++) update();
+  render();
+  renderStats();
+}
+
+function init(){
+  if(frameId) cancelAnimationFrame(frameId);
+  parcels=[]; resv=new Map(); staticRes=[];
+  tick=0; T=0; totalSorted=0; batchCount=0; lastLaunch=0;
+  BKEYS.forEach(k=>counts[k]=0);
+  document.getElementById('leg').innerHTML='';
+  resize();
+  stageBatch();
+  loop();
+}
+
+document.getElementById('btnRst').onclick=init;
+document.getElementById('btnSpd').onclick=()=>{
+  speedIdx=(speedIdx+1)%SPEEDS.length;
+  document.getElementById('spd').textContent=SPEEDS[speedIdx]+'×';
+};
+window.addEventListener('resize',resize);
+init();
+</script>
+
+</body></html>

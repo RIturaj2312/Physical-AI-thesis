@@ -1,0 +1,358 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Conveyor Belt Sorter</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg:#080b12;--surface:#0f1320;--surface2:#161b2e;
+  --border:#222840;--fg:#dde2f5;--fg2:#6b729a;--accent:#4477ff;
+  color-scheme:dark;
+}
+@media(prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){--bg:#eef0f8;--surface:#fff;--surface2:#e4e7f4;--border:#ccd0e8;--fg:#151828;--fg2:#5a6080;--accent:#3055d0;color-scheme:light;}
+}
+:root[data-theme="light"]{--bg:#eef0f8;--surface:#fff;--surface2:#e4e7f4;--border:#ccd0e8;--fg:#151828;--fg2:#5a6080;--accent:#3055d0;color-scheme:light;}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:var(--bg);color:var(--fg);font-family:'Inter',sans-serif;overflow-x:hidden;}
+body{padding-block:12px;padding-left:max(12px,env(safe-area-inset-left,0px));padding-right:max(12px,env(safe-area-inset-right,0px));}
+.app{display:flex;flex-direction:column;gap:10px;}
+header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;}
+h1{font-size:14px;font-weight:600;}
+.sub{font-size:10px;color:var(--fg2);font-family:'JetBrains Mono',monospace;margin-top:2px;}
+.controls{display:flex;gap:6px;align-items:center;}
+button{font-family:'Inter',sans-serif;font-size:11px;font-weight:500;padding:5px 12px;border-radius:5px;border:1px solid var(--border);background:var(--surface);color:var(--fg);cursor:pointer;transition:background .12s;}
+button:hover{background:var(--surface2);border-color:var(--accent);}
+.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+.primary:hover{opacity:.85;}
+#spd{font-size:10px;color:var(--fg2);font-family:'JetBrains Mono',monospace;min-width:22px;}
+.canvas-wrap{border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface);}
+canvas{display:block;margin:0 auto;}
+.info-row{display:flex;flex-wrap:wrap;gap:6px;}
+.chip{font-size:10px;font-family:'JetBrains Mono',monospace;padding:3px 9px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--fg2);}
+.chip b{color:var(--fg);font-weight:500;}
+.chip.warn b{color:#ff7a45;}
+.legend{display:flex;flex-wrap:wrap;gap:12px;font-size:10px;color:var(--fg2);}
+.legend span b{color:var(--fg);font-weight:500;}
+</style><script>if(/[?&]mini/.test(location.search)){window.MINI=1;document.addEventListener('keydown',function(e){if(e.key==='Escape')parent.postMessage('pb-esc','*')});document.documentElement.setAttribute('data-theme','dark');document.write('<style>header,.info-row,.legend{display:none!important}body{padding:0!important}.canvas-wrap{border:0!important;border-radius:0!important}</style>')}</script>
+</head><body>
+<div class="app">
+  <header>
+    <div>
+      <h1>Conventional Conveyor Belt Sorter</h1>
+      <div class="sub">single induction point · one fixed loop · one scanner · fixed slot spacing</div>
+    </div>
+    <div class="controls">
+      <span id="spd">1×</span>
+      <button id="btnSpd">Speed</button>
+      <button class="primary" id="btnRst">Restart</button>
+    </div>
+  </header>
+  <div class="canvas-wrap"><canvas id="c"></canvas></div>
+  <div class="info-row" id="stats"></div>
+  <div class="legend">
+    <span><b>1 · Induction</b> parcels queue on one feeder and merge only into an empty slot on the loop</span>
+    <span><b>2 · Scanner</b> every label is read on the first pass</span>
+    <span><b>3 · Diverters</b> push a parcel into its chute only if the chute is clear</span>
+    <span><b>4 · Throughput limit</b> one feeder and one slot per parcel on the loop cap how fast parcels can enter</span>
+  </div>
+</div>
+<script>
+/*
+  Loop sorter model. All motion is along fixed tracks at one constant speed V
+  (px per tick): the feeder, the loop belt and the chutes.
+  - The loop is a stadium-shaped belt; a parcel on it is a position s along
+    its length and moves rigidly with the belt, so spacing never changes.
+  - Feeder: an accumulation conveyor. Each parcel moves at V until it is one
+    pitch behind the parcel ahead, then stops. The head parcel merges only
+    when no loop parcel is within one pitch of the merge point.
+  - Scanner: reads every label on the first pass.
+  - Diverter: at its chute, a read parcel with that destination is pushed out
+    at V, if no parcel in the chute is within one pitch of the belt.
+    Belt spacing (TAIL) guarantees this, so no parcel ever needs a second lap.
+*/
+const WW=1000, WH=640;                 // world size (px)
+const V=2.4;                           // belt speed, px per tick
+const PS=30;                           // parcel size
+const PITCH=PS+16;                     // minimum centre spacing along a track
+const TAIL=2*PS+8;                     // clear belt behind a parcel being pushed into a chute
+const CX1=250, CX2=800, CY=300, R=120; // loop: two semicircles joined by straights
+const STRAIGHT=CX2-CX1, ARC=Math.PI*R;
+const L=2*STRAIGHT+2*ARC;              // loop length
+const BELT_W=46;
+
+// Point and tangent angle at distance s along the loop (bottom runs left→right)
+function loopAt(s){
+  s=((s%L)+L)%L;
+  if(s<STRAIGHT) return {x:CX1+s,y:CY+R,a:0};
+  s-=STRAIGHT;
+  if(s<ARC){ const t=Math.PI/2-s/R; return {x:CX2+R*Math.cos(t),y:CY+R*Math.sin(t),a:t-Math.PI/2}; }
+  s-=ARC;
+  if(s<STRAIGHT) return {x:CX2-s,y:CY-R,a:Math.PI};
+  s-=STRAIGHT;
+  const t=-Math.PI/2-s/R; return {x:CX1+R*Math.cos(t),y:CY+R*Math.sin(t),a:t-Math.PI/2};
+}
+const sBottom=x=>x-CX1;
+const sTop=x=>STRAIGHT+ARC+(CX2-x);
+
+// Feeder enters the bottom straight from the lower left at 45°
+const S_MERGE=sBottom(320);
+const MERGE=loopAt(S_MERGE);
+const F_LEN=250, F_ANG=-Math.PI/4;
+const F0={x:MERGE.x-F_LEN*Math.cos(F_ANG),y:MERGE.y-F_LEN*Math.sin(F_ANG)};
+const S_SCAN=sBottom(420);
+
+const BC={A:'#5ba8ff',B:'#4ecf88',C:'#ffb840',D:'#cc77ff',E:'#ff5566',F:'#ff8844',G:'#5be0e0',H:'#ffcc44',I:'#aa88ff'};
+const CATS=Object.keys(BC);
+const CH_LEN=118;
+// Chutes: A–F off the top straight (met first on the right), G–I off the bottom
+const CHUTES=[
+  ...['A','B','C','D','E','F'].map((k,i)=>({k,s:sTop(745-i*90),dir:-1})),
+  ...['G','H','I'].map((k,i)=>({k,s:sBottom(560+i*100),dir:1})),
+];
+CHUTES.forEach(c=>{ const p=loopAt(c.s); c.x=p.x; c.y=p.y; c.push=0; c.count=0; });
+
+let parcels=[],tick=0,idSeq=0,beltOff=0,nextArrival=0,scanFlash=0;
+let stats={sorted:0,recirc:0,totalTime:0};
+const SPEEDS=[1,2,3,5]; let speedIdx=0,frameId;
+
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+let K=1;
+function resize(){
+  const W=canvas.parentElement.clientWidth;
+  const top=canvas.parentElement.getBoundingClientRect().top+window.scrollY;
+  const H=window.innerHeight-top-(window.MINI?2:96);
+  K=Math.max(0.35,Math.min((W-8)/WW,H/WH)*0.97);
+  const dpr=window.devicePixelRatio||1;
+  canvas.style.width=Math.round(WW*K)+'px';
+  canvas.style.height=Math.round(WH*K)+'px';
+  canvas.width=Math.round(WW*K*dpr);
+  canvas.height=Math.round(WH*K*dpr);
+  ctx.setTransform(K*dpr,0,0,K*dpr,0,0);
+}
+
+// ── Simulation ───────────────────────────────────────────────────────────
+const fwd=(from,to)=>((to-from)%L+L)%L;   // belt distance from → to
+
+function spawn(){
+  const q=parcels.filter(p=>p.state==='queue');
+  if(q.length&&Math.min(...q.map(p=>p.f))<PITCH) return false; // feeder entry occupied
+  parcels.push({id:idSeq++,cat:CATS[Math.floor(Math.random()*CATS.length)],state:'queue',
+    f:0,s:0,d:0,go:false,chute:null,read:null,laps:0,born:tick,alpha:1});
+  return true;
+}
+// The head waits MERGE_D short of the belt. It is released only if, by the
+// time it reaches the merge point, it will have a full slot (TAIL) of empty
+// belt in front of and behind it.
+const MERGE_D=64;
+function mergeFree(){
+  return parcels.every(p=>p.state!=='belt'||
+    (fwd(p.s,S_MERGE)>=MERGE_D+TAIL&&fwd(S_MERGE,p.s)>=TAIL));
+}
+
+function update(){
+  tick++;
+  beltOff=(beltOff+V)%20;
+  if(scanFlash>0) scanFlash--;
+  CHUTES.forEach(c=>{ if(c.push>0) c.push--; });
+
+  // Arrivals on the feeder at a random rate
+  if(tick>=nextArrival&&spawn()) nextArrival=tick+16+Math.floor(Math.random()*26);
+
+  // Chutes: parcels slide out at belt speed and drop into the bin
+  parcels.forEach(p=>{
+    if(p.state!=='chute') return;
+    p.d+=V;
+    if(p.d>CH_LEN-20) p.alpha=Math.max(0,(CH_LEN-p.d)/20);
+    if(p.d>=CH_LEN){
+      p.state='done'; p.chute.count++; stats.sorted++; stats.totalTime+=tick-p.born;
+    }
+  });
+  parcels=parcels.filter(p=>p.state!=='done');
+
+  // Loop belt
+  parcels.forEach(p=>{
+    if(p.state!=='belt') return;
+    const prev=p.s; p.s=(p.s+V)%L;
+    const crossed=x=>fwd(prev,x)<V;
+    if(crossed(S_SCAN)){
+      if(p.laps>0) stats.recirc++;            // back at the scanner: an extra lap
+      p.read=true; scanFlash=10;
+      p.laps++;
+    }
+    for(const c of CHUTES){
+      if(!crossed(c.s)||!p.read||p.cat!==c.k) continue;
+      // The chute mouth must be clear, and the next parcel upstream far enough
+      // back that the outgoing parcel is off the belt before it arrives.
+      const busy=parcels.some(o=>o.state==='chute'&&o.chute===c&&o.d<PITCH)||
+        parcels.some(o=>o!==p&&o.state==='belt'&&fwd(o.s,c.s)<TAIL);
+      if(!busy){ p.state='chute'; p.chute=c; p.d=fwd(c.s,p.s); c.push=14; }
+      break;
+    }
+  });
+
+  // Feeder: accumulation conveyor, head first
+  const q=parcels.filter(p=>p.state==='queue').sort((a,b)=>b.f-a.f);
+  q.forEach((p,i)=>{
+    const stop=p.go?F_LEN:F_LEN-MERGE_D;     // unreleased parcels wait short of the belt
+    const limit=i>0?Math.min(q[i-1].f-PITCH,stop):stop;
+    p.f=Math.min(p.f+V,limit);
+  });
+  if(q.length){
+    const h=q[0];
+    if(h.go&&h.f>=F_LEN){ h.state='belt'; h.s=S_MERGE; }
+    else if(!h.go&&h.f>=F_LEN-MERGE_D&&mergeFree()) h.go=true;
+  }
+}
+
+function parcelPose(p){
+  if(p.state==='queue')
+    return {x:F0.x+p.f*Math.cos(F_ANG),y:F0.y+p.f*Math.sin(F_ANG),a:F_ANG};
+  if(p.state==='belt') return loopAt(p.s);
+  const c=p.chute;
+  return {x:c.x,y:c.y+c.dir*p.d,a:c.dir*Math.PI/2};
+}
+
+// ── Render ───────────────────────────────────────────────────────────────
+function rr(x,y,w,h,r){ctx.beginPath();ctx.roundRect(x,y,w,h,r);}
+function render(){
+  const dark=document.documentElement.dataset.theme
+    ?document.documentElement.dataset.theme==='dark'
+    :window.matchMedia('(prefers-color-scheme:dark)').matches;
+  const C=dark?{bg:'#0a0f1e',belt:'#1a2238',rail:'#3a4670',slat:'rgba(140,160,220,0.22)',
+      txt:'rgba(220,226,245,0.55)',bin:'#0c1228',binb:'#1e2a50',chute:'#141c32',arrow:'rgba(120,150,255,0.35)'}
+    :{bg:'#f3f4fb',belt:'#c9cee6',rail:'#8890c0',slat:'rgba(60,70,120,0.22)',
+      txt:'rgba(20,24,40,0.5)',bin:'#e8eaf8',binb:'#bcc4e8',chute:'#dde1f2',arrow:'rgba(50,80,200,0.35)'};
+  ctx.fillStyle=C.bg; ctx.fillRect(0,0,WW,WH);
+
+  // Chutes and bins
+  CHUTES.forEach(c=>{
+    const y0=c.y+c.dir*(BELT_W/2), y1=c.y+c.dir*CH_LEN;
+    ctx.fillStyle=C.chute;
+    ctx.fillRect(c.x-PS/2-5,Math.min(y0,y1),PS+10,Math.abs(y1-y0));
+    ctx.strokeStyle=C.slat; ctx.lineWidth=1;
+    for(let d=BELT_W/2+((beltOff*0.5)%12);d<CH_LEN;d+=12){
+      ctx.beginPath(); ctx.moveTo(c.x-PS/2-5,c.y+c.dir*d); ctx.lineTo(c.x+PS/2+5,c.y+c.dir*d); ctx.stroke();
+    }
+    const by=c.dir<0?c.y-CH_LEN-48:c.y+CH_LEN;
+    ctx.fillStyle=C.bin; ctx.strokeStyle=C.binb; rr(c.x-34,by,68,48,5); ctx.fill(); ctx.stroke();
+    ctx.fillStyle=BC[c.k]+(dark?'30':'22'); rr(c.x-33,by+1,66,46,4); ctx.fill();
+    ctx.fillStyle=BC[c.k]; ctx.font='700 17px Inter,sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(c.k,c.x,by+17);
+    ctx.font='600 11px JetBrains Mono,monospace'; ctx.fillStyle=C.txt;
+    ctx.fillText(c.count,c.x,by+35);
+  });
+
+  // Feeder
+  ctx.save(); ctx.translate(F0.x,F0.y); ctx.rotate(F_ANG);
+  ctx.fillStyle=C.belt; ctx.fillRect(-20,-BELT_W/2,F_LEN+20,BELT_W);
+  ctx.strokeStyle=C.slat; ctx.lineWidth=1.2;
+  for(let d=beltOff-20;d<F_LEN;d+=20){ctx.beginPath();ctx.moveTo(d,-BELT_W/2+3);ctx.lineTo(d,BELT_W/2-3);ctx.stroke();}
+  ctx.strokeStyle=C.rail; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(-20,-BELT_W/2); ctx.lineTo(F_LEN,-BELT_W/2);
+  ctx.moveTo(-20,BELT_W/2); ctx.lineTo(F_LEN-BELT_W/2,BELT_W/2); ctx.stroke();
+  ctx.restore();
+
+  // Loop belt with moving slats
+  ctx.lineCap='butt';
+  ctx.beginPath();
+  for(let s=0;s<=L;s+=4){const p=loopAt(s); s?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y);}
+  ctx.closePath();
+  ctx.strokeStyle=C.rail; ctx.lineWidth=BELT_W+4; ctx.stroke();
+  ctx.strokeStyle=C.belt; ctx.lineWidth=BELT_W; ctx.stroke();
+  ctx.strokeStyle=C.slat; ctx.lineWidth=1.2;
+  for(let s=beltOff;s<L;s+=20){
+    const p=loopAt(s), nx=-Math.sin(p.a), ny=Math.cos(p.a), h=BELT_W/2-3;
+    ctx.beginPath(); ctx.moveTo(p.x-nx*h,p.y-ny*h); ctx.lineTo(p.x+nx*h,p.y+ny*h); ctx.stroke();
+  }
+  // Direction arrows inside the loop
+  ctx.fillStyle=C.arrow; ctx.font='600 12px JetBrains Mono,monospace';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText('RECIRCULATION LOOP',(CX1+CX2)/2,CY-10);
+  ctx.fillText('↺  belt runs at one fixed speed',(CX1+CX2)/2,CY+12);
+
+  // Diverter paddles on the far side of the belt from each chute
+  CHUTES.forEach(c=>{
+    const ext=c.push>0?Math.sin((14-c.push)/14*Math.PI)*BELT_W*0.8:0;
+    const y=c.y-c.dir*(BELT_W/2+4)+c.dir*ext;
+    ctx.fillStyle=c.push>0?BC[c.k]:C.rail;
+    rr(c.x-PS/2,y-3,PS,6,2); ctx.fill();
+  });
+
+  // Scanner arch
+  const sc=loopAt(S_SCAN);
+  ctx.fillStyle=C.rail; rr(sc.x-6,sc.y-BELT_W/2-14,12,BELT_W+28,3); ctx.fill();
+  if(scanFlash>0){
+    ctx.strokeStyle=`rgba(255,60,60,${0.25+scanFlash/14})`; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(sc.x,sc.y-BELT_W/2); ctx.lineTo(sc.x,sc.y+BELT_W/2); ctx.stroke();
+  }
+
+  // Labels
+  ctx.fillStyle=C.txt; ctx.font='600 11px JetBrains Mono,monospace'; ctx.textAlign='center';
+  ctx.fillText('SCANNER',sc.x,sc.y+BELT_W/2+26);
+  ctx.save(); ctx.translate(F0.x,F0.y); ctx.rotate(F_ANG);
+  ctx.fillText('INDUCTION · single feeder',85,-BELT_W/2-12); ctx.restore();
+
+  // Parcels
+  parcels.forEach(p=>{
+    const {x,y,a}=parcelPose(p);
+    ctx.save(); ctx.globalAlpha=p.alpha; ctx.translate(x,y); ctx.rotate(a);
+    ctx.fillStyle='rgba(0,0,0,0.25)'; rr(-PS/2+2,-PS/2+3,PS,PS,4); ctx.fill();
+    ctx.fillStyle=BC[p.cat]; rr(-PS/2,-PS/2,PS,PS,4); ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.2)'; rr(-PS/2+3,-PS/2+3,PS-6,PS*0.3,3); ctx.fill();
+    ctx.rotate(-a);
+    ctx.fillStyle='#fff'; ctx.font='800 14px Inter,sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(p.cat,0,1);
+    ctx.restore();
+  });
+
+  // Bottleneck callout around the induction merge: every parcel enters here
+  const pulse=0.5+0.5*Math.sin(tick*0.08);
+  const bx=MERGE.x-72, by=MERGE.y-52, bw=144, bh=124;
+  ctx.save();
+  ctx.fillStyle=`rgba(255,45,149,${0.06+0.06*pulse})`;
+  rr(bx,by,bw,bh,10); ctx.fill();
+  ctx.setLineDash([10,6]); ctx.lineDashOffset=-tick*0.5;
+  ctx.strokeStyle='#ff2d95'; ctx.lineWidth=3;
+  ctx.shadowColor='#ff2d95'; ctx.shadowBlur=8+10*pulse;
+  rr(bx,by,bw,bh,10); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font='800 20px Inter,sans-serif'; ctx.textAlign='center'; ctx.textBaseline='bottom';
+  ctx.fillStyle='#ff2d95';
+  ctx.fillText('BOTTLENECK',MERGE.x,by-8);
+  ctx.restore();
+}
+
+function renderStats(){
+  const onLoop=parcels.filter(p=>p.state==='belt').length;
+  const waiting=parcels.filter(p=>p.state==='queue').length;
+  const avg=stats.sorted?(stats.totalTime/stats.sorted/60).toFixed(1):'–';
+  document.getElementById('stats').innerHTML=
+    `<div class="chip">Sorted <b>${stats.sorted}</b></div>`+
+    `<div class="chip">On loop <b>${onLoop}</b></div>`+
+    `<div class="chip warn">Queued at induction <b>${waiting}</b></div>`+
+    `<div class="chip">Avg time to sort <b>${avg}s</b></div>`;
+}
+
+function loop(){
+  frameId=requestAnimationFrame(loop);
+  for(let i=0;i<SPEEDS[speedIdx];i++) update();
+  render(); renderStats();
+}
+function init(){
+  if(frameId) cancelAnimationFrame(frameId);
+  parcels=[]; tick=0; idSeq=0; nextArrival=0; scanFlash=0;
+  stats={sorted:0,recirc:0,totalTime:0};
+  CHUTES.forEach(c=>{c.count=0;c.push=0;});
+  resize(); loop();
+}
+document.getElementById('btnRst').onclick=init;
+document.getElementById('btnSpd').onclick=()=>{
+  speedIdx=(speedIdx+1)%SPEEDS.length;
+  document.getElementById('spd').textContent=SPEEDS[speedIdx]+'×';
+};
+window.addEventListener('resize',resize);
+init();
+</script>
+</body></html>
